@@ -110,10 +110,49 @@ document.getElementById('paste-confirm').onclick=()=>{const t=document.getElemen
 
 async function readFileAsText(file){const buf=await file.arrayBuffer(); const dec=(enc,f)=>{try{return new TextDecoder(enc,{fatal:f}).decode(buf);}catch{return null;}}; let txt=dec('utf-8',true); if(txt===null) txt=dec('euc-kr',false); if(txt===null) txt=dec('windows-1252',false); if(!txt) txt=new TextDecoder().decode(buf); return txt;}
 async function parsePDF(file){
-  const pdfjsLib=window.pdfjsLib; pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-  const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise; let full='';
-  for(let i=1;i<=pdf.numPages;i++){const page=await pdf.getPage(i); const tc=await page.getTextContent(); let lines={}; tc.items.forEach(item=>{const y=Math.round(item.transform[5]); if(!lines[y]) lines[y]=[]; lines[y].push(item.str);}); const sortedY=Object.keys(lines).map(Number).sort((a,b)=>b-a); sortedY.forEach(y=>{full+=lines[y].join(' ').trim()+'\n';}); full+='\n';}
-  full=full.replace(/\s+/g,' ').replace(/\n\s*\n/g,'\n\n'); full=full.replace(/(\d+\s*장\s*[\.·])/g,'\n\n$1\n').replace(/(제\s*\d+\s*[장화부])/g,'\n\n$1'); if(full.trim().length<80) throw new Error('스캔본 PDF는 텍스트 추출 불가'); return full;
+  const pdfjsLib=window.pdfjsLib;
+  pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;
+  let full='';
+  for(let i=1;i<=pdf.numPages;i++){
+    const page=await pdf.getPage(i);
+    const tc=await page.getTextContent();
+    // y좌표 기준 줄 그룹화 + x좌표 기준 정렬
+    const lines={};
+    tc.items.forEach(item=>{
+      const y=Math.round(item.transform[5]/2)*2; // 2pt 단위로 그룹화 - 더 정확
+      const x=item.transform[4];
+      if(!lines[y]) lines[y]=[];
+      lines[y].push({x, str:item.str, hasEOL:item.hasEOL||false});
+    });
+    const sortedY=Object.keys(lines).map(Number).sort((a,b)=>b-a);
+    let prevY=null;
+    sortedY.forEach(y=>{
+      const items=lines[y].sort((a,b)=>a.x-b.x);
+      let lineText=items.map(it=>it.str).join('').trim();
+      // 빈 줄 스킵
+      if(!lineText) return;
+      // 줄 간격이 크면 빈 줄 추가 (문단 구분)
+      if(prevY!==null){
+        const gap=prevY - y;
+        if(gap>18) full+='\n\n';
+        else if(gap>10) full+='\n';
+      }
+      full+=lineText+'\n';
+      prevY=y;
+    });
+    full+='\n\n';
+  }
+  // 후처리 - 줄바꿈은 유지하면서 공백만 정리
+  full=full.split('\n').map(l=>l.replace(/\s{2,}/g,' ').trim()).join('\n');
+  full=full.replace(/\n{3,}/g,'\n\n');
+  // 챕터 패턴 앞에 개행 강제 - 본문과 분리
+  full=full.replace(/(\d+\s*장\s*[\.·]?\s*)/g, '\n\n$1\n');
+  full=full.replace(/(제\s*\d+\s*[장화부권])/g, '\n\n$1');
+  full=full.replace(/\n\n\s*\n/g,'\n\n');
+  if(full.trim().length<80) throw new Error('스캔본 PDF는 텍스트 추출 불가');
+  console.log('PDF parsed length', full.length, 'lines', full.split('\n').length);
+  return full;
 }
 async function parseFile(file){const ext=file.name.split('.').pop().toLowerCase(); if(['txt','md','markdown'].includes(ext)) return {title:file.name.replace(/\.[^.]+$/,''), text:await readFileAsText(file)}; if(['html','htm'].includes(ext)){const raw=await readFileAsText(file); const doc=new DOMParser().parseFromString(raw,'text/html'); doc.querySelectorAll('script,style,noscript').forEach(el=>el.remove()); return {title:file.name.replace(/\.[^.]+$/,''), text:doc.body?doc.body.innerText:raw};} if(ext==='docx'){const zip=await JSZip.loadAsync(await file.arrayBuffer()); const xml=await zip.file('word/document.xml').async('string'); const paras=[...xml.matchAll(/<w:p[^>]*>(.*?)<\/w:p>/gs)].map(m=>[...m[1].matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map(x=>x[1]).join('')).filter(Boolean).join('\n\n'); return {title:file.name.replace(/\.[^.]+$/,''), text:paras};} if(ext==='pdf'){const txt=await parsePDF(file); return {title:file.name.replace(/\.[^.]+$/,''), text:txt};} if(ext==='epub'){const zip=await JSZip.loadAsync(await file.arrayBuffer()); const containerXml=await zip.file('META-INF/container.xml').async('string'); const opfPath=(containerXml.match(/full-path="([^"]+)"/)||[])[1]||'OEBPS/content.opf'; const opfDir=opfPath.split('/').slice(0,-1).join('/'); const opf=await zip.file(opfPath).async('string'); const idToHref={}; [...opf.matchAll(/<item[^>]*href="([^"]+)"[^>]*id="([^"]+)"[^>]*>/g)].forEach(m=>idToHref[m[2]]=m[1]); let full=''; for(const m of [...opf.matchAll(/<itemref[^>]*idref="([^"]+)"/g)]){const href=idToHref[m[1]]; if(!href) continue; const path=opfDir?opfDir+'/'+href:href; const f=zip.file(path); if(!f) continue; const html=await f.async('string'); const doc=new DOMParser().parseFromString(html,'text/html'); full+=doc.body.innerText+'\n\n';} return {title:file.name.replace(/\.[^.]+$/,''), text:full};} return {title:file.name, text:await readFileAsText(file)};}
 document.getElementById('fileInput').addEventListener('change', async e=>{const file=e.target.files[0]; if(!file) return; try{const {title,text}=await parseFile(file); createBook(title,text);}catch(err){alert('읽기 실패: '+err.message);} e.target.value='';});
