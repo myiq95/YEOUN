@@ -174,15 +174,43 @@ function saveProgress(force=false){
 }
 function formatContent(raw){
   const blocks=[];
-  // 챕터 패턴 - 더 넓게, 그리고 분리 가능하게
   const chapterRegex=/^\s*(제\s*\d+\s*[장화부권]|제\d+[장화부권]|\d+\s*장\s*[\.·]?\s*|\d+\s*부\s*[\.·]?|프롤로그|에필로그|서문|서장|종장|외전|후기|작가의 말|Chapter\s*\d+)/i;
   const chapterSplitRegex=/^(\s*(?:제\s*\d+\s*[장화부권]|제\d+[장화부권]|\d+\s*장\s*[\.·]?|프롤로그|에필로그|서문|Chapter\s*\d+)[^가-힣]{0,8})\s*(.*)$/i;
-  const dialogueRegex=/^\s*["“”‘’\-—]|:\s*["“]/;
+  const dialogueStartRegex=/^\s*[\"“”‘’\-—]/;
+  // 문단 안에 대사("...")가 섞여 있는 경우를 분리하는 함수 - 지침 8번: 대사/지문 별도 행
+  function splitParagraphWithDialogue(text){
+    const result=[];
+    // 따옴표로 감싼 대사 찾기: "..." 또는 “...” 또는 '...' 등
+    const dialoguePattern=/(\"[^\"]+\"|“[^”]+”|‘[^’]+’|『[^』]+』)/g;
+    let lastIndex=0;
+    let match;
+    while((match=dialoguePattern.exec(text))!==null){
+      const before=text.slice(lastIndex, match.index).trim();
+      const dialogue=match[0];
+      if(before.length>0){
+        // 앞의 지문을 문단으로
+        // 마침표 등으로 더 쪼갤 수 있으면 문장 단위로도 분리
+        const sentences=before.split(/(?<=[.!?。]\s+)/).map(s=>s.trim()).filter(Boolean);
+        sentences.forEach(s=>{ if(s.length>0) result.push({type:'para', text:s}); });
+      }
+      // 대사는 따옴표 제거하고 dialogue로
+      const clean=dialogue.replace(/^[\"“”‘’『]+|[\"“”‘’』]+$/g,'').trim();
+      if(clean.length>0) result.push({type:'dialogue', text:clean});
+      lastIndex=match.index+match[0].length;
+    }
+    const after=text.slice(lastIndex).trim();
+    if(after.length>0){
+      const sentences=after.split(/(?<=[.!?。]\s+)/).map(s=>s.trim()).filter(Boolean);
+      sentences.forEach(s=>{ if(s.length>0) result.push({type:'para', text:s}); });
+    }
+    if(result.length===0) result.push({type:'para', text:text});
+    return result;
+  }
+
   const rawBlocks=raw.split(/\n\s*\n/).map(b=>b.trim()).filter(b=>b.length>0);
   rawBlocks.forEach(b=>{
     const lines=b.split('\n').map(l=>l.trim()).filter(Boolean);
     lines.forEach(line=>{
-      // 한 줄에 챕터 제목 + 본문이 붙어 있는 경우 분리 (예: "1 장 . 이방인의 발길이...")
       const m=line.match(chapterSplitRegex);
       if(m){
         const chapPart=m[1].trim();
@@ -190,33 +218,38 @@ function formatContent(raw){
         if(chapPart.length>0 && chapPart.length<=80){
           blocks.push({type:'chapter', text:chapPart});
           if(rest.length>=10){
-            // 남은 본문은 별도 문단으로
-            blocks.push({type:'para', text:rest});
+            // 나머지 본문도 대사/지문 분리 적용
+            blocks.push(...splitParagraphWithDialogue(rest));
           }
           return;
         }
       }
       if(chapterRegex.test(line)){
-        // 긴 줄이어도 챕터로 시작하면 챕터로, 단 120자 이하면
         if(line.length<=120){
           blocks.push({type:'chapter', text:line});
         } else {
-          // 너무 길면 앞부분만 챕터로, 나머지는 본문으로 분리
           const short=line.slice(0,60).trim();
           const remainder=line.slice(60).trim();
           if(chapterRegex.test(short)){
             blocks.push({type:'chapter', text:short});
-            if(remainder) blocks.push({type:'para', text:remainder});
+            if(remainder) blocks.push(...splitParagraphWithDialogue(remainder));
           } else {
-            blocks.push({type:'para', text:line});
+            blocks.push(...splitParagraphWithDialogue(line));
           }
         }
-      } else if(dialogueRegex.test(line)){
-        blocks.push({type:'dialogue', text:line});
+      } else if(dialogueStartRegex.test(line) && line.length<=200){
+        // 라인이 대사로 시작하면 전체를 대사로
+        const clean=line.replace(/^[\"“”\-—\s]+/, '').replace(/[\"”\s]+$/, '').trim();
+        blocks.push({type:'dialogue', text:clean || line});
       } else if(line.length<=50 && blocks.length<2){
         blocks.push({type:'title', text:line});
       } else {
-        blocks.push({type:'para', text:line});
+        // 일반 문단은 대사/지문 분리 시도 - 지침 8번 철저 준수
+        if(line.includes('"') || line.includes('“') || line.includes('”')){
+          blocks.push(...splitParagraphWithDialogue(line));
+        } else {
+          blocks.push({type:'para', text:line});
+        }
       }
     });
   });
