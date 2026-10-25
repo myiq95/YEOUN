@@ -154,7 +154,23 @@ async function parsePDF(file){
   console.log('PDF parsed length', full.length, 'lines', full.split('\n').length);
   return full;
 }
-async function parseFile(file){const ext=file.name.split('.').pop().toLowerCase(); if(['txt','md','markdown'].includes(ext)) return {title:file.name.replace(/\.[^.]+$/,''), text:await readFileAsText(file)}; if(['html','htm'].includes(ext)){const raw=await readFileAsText(file); const doc=new DOMParser().parseFromString(raw,'text/html'); doc.querySelectorAll('script,style,noscript').forEach(el=>el.remove()); return {title:file.name.replace(/\.[^.]+$/,''), text:doc.body?doc.body.innerText:raw};} if(ext==='docx'){const zip=await JSZip.loadAsync(await file.arrayBuffer()); const xml=await zip.file('word/document.xml').async('string'); const decodeEntities=(s)=>s.replace(/&quot;/g,'"').replace(/&apos;/g,"'").replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&'); const paras=[...xml.matchAll(/<w:p[^>]*>(.*?)<\/w:p>/gs)].map(m=>[...m[1].matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map(x=>decodeEntities(x[1])).join('')).filter(Boolean).join('\n\n'); return {title:file.name.replace(/\.[^.]+$/,''), text:paras};} if(ext==='pdf'){const txt=await parsePDF(file); return {title:file.name.replace(/\.[^.]+$/,''), text:txt};} if(ext==='epub'){const zip=await JSZip.loadAsync(await file.arrayBuffer()); const containerXml=await zip.file('META-INF/container.xml').async('string'); const opfPath=(containerXml.match(/full-path="([^"]+)"/)||[])[1]||'OEBPS/content.opf'; const opfDir=opfPath.split('/').slice(0,-1).join('/'); const opf=await zip.file(opfPath).async('string'); const idToHref={}; [...opf.matchAll(/<item[^>]*href="([^"]+)"[^>]*id="([^"]+)"[^>]*>/g)].forEach(m=>idToHref[m[2]]=m[1]); let full=''; for(const m of [...opf.matchAll(/<itemref[^>]*idref="([^"]+)"/g)]){const href=idToHref[m[1]]; if(!href) continue; const path=opfDir?opfDir+'/'+href:href; const f=zip.file(path); if(!f) continue; const html=await f.async('string'); const doc=new DOMParser().parseFromString(html,'text/html'); full+=doc.body.innerText+'\n\n';} return {title:file.name.replace(/\.[^.]+$/,''), text:full};} let _raw=await readFileAsText(file); _raw=_raw.replace(/&quot;/g,'"').replace(/&apos;/g,"'").replace(/&amp;/g,'&'); return {title:file.name, text:_raw};}
+  if(['txt','md','markdown'].includes(ext)){
+    let raw=await readFileAsText(file);
+    raw=raw.replace(/```[\s\S]*?```/g, (m)=>m.replace(/```/g,''));
+    raw=raw.replace(/^\s*#{1,6}\s*/gm, '');
+    raw=raw.replace(/\*\*(.*?)\*\*/g, '$1');
+    raw=raw.replace(/__(.*?)__/g, '$1');
+    raw=raw.replace(/\*(.*?)\*/g, '$1');
+    raw=raw.replace(/_(.*?)_/g, '$1');
+    raw=raw.replace(/^\s*[-*+]\s+/gm, '');
+    raw=raw.replace(/^\s*\d+\.\s+/gm, '');
+    raw=raw.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+    raw=raw.replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1');
+    raw=raw.replace(/^\s*>\s*/gm, '');
+    raw=raw.replace(/`([^`]+)`/g, '$1');
+    raw=raw.replace(/^\s*[-*_]{3,}\s*$/gm, '');
+    return {title:file.name.replace(/\.[^.]+$/,''), text:raw};
+  }
 document.getElementById('fileInput').addEventListener('change', async e=>{const file=e.target.files[0]; if(!file) return; try{const {title,text}=await parseFile(file); createBook(title,text);}catch(err){alert('읽기 실패: '+err.message);} e.target.value='';});
 
 function createBook(title,text){const id=Date.now().toString(); const book={id,title:title.slice(0,120), raw:text, progress:0, lastRead:Date.now(), status:'reading'}; library.unshift(book); localStorage.setItem(LS_KEY, JSON.stringify(library)); openBook(id);}
