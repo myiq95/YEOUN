@@ -120,13 +120,69 @@ document.getElementById('fileInput').addEventListener('change', async e=>{const 
 
 function createBook(title,text){const id=Date.now().toString(); const book={id,title:title.slice(0,120), raw:text, progress:0, lastRead:Date.now(), status:'reading'}; library.unshift(book); localStorage.setItem(LS_KEY, JSON.stringify(library)); openBook(id);}
 function saveLib(){localStorage.setItem(LS_KEY, JSON.stringify(library));}
-function saveProgress(force=false){if(!currentBook) return; const y=window.scrollY; if(y<20 && !force) return; currentBook.progress=y; currentBook.lastRead=Date.now(); if((y+window.innerHeight)/document.documentElement.scrollHeight>0.92) currentBook.status='finished'; saveLib(); localStorage.setItem('yeoun-current', currentBook.id);}
+function saveProgress(force=false){
+  if(!currentBook) return;
+  const y=window.scrollY;
+  if(y<20 && !force) return;
+  const total=document.documentElement.scrollHeight-window.innerHeight;
+  const pct=total>0? Math.min(100, Math.max(0, (y/total)*100)) : 0;
+  currentBook.progress=y;
+  currentBook.progressPct=pct;
+  currentBook.lastRead=Date.now();
+  if(pct>92) currentBook.status='finished';
+  saveLib();
+  localStorage.setItem('yeoun-current', currentBook.id);
+}
 function formatContent(raw){
-  const blocks=[]; const chapterRegex=/^\s*(제\s*\d+\s*[장화부권]|제\d+[장화부권]|\d+\s*장\s*[\.·]?|\d+\s*부|프롤로그|에필로그|서문|서장|종장|외전|후기|작가의 말|Chapter\s*\d+)/i;
+  const blocks=[];
+  // 챕터 패턴 - 더 넓게, 그리고 분리 가능하게
+  const chapterRegex=/^\s*(제\s*\d+\s*[장화부권]|제\d+[장화부권]|\d+\s*장\s*[\.·]?\s*|\d+\s*부\s*[\.·]?|프롤로그|에필로그|서문|서장|종장|외전|후기|작가의 말|Chapter\s*\d+)/i;
+  const chapterSplitRegex=/^(\s*(?:제\s*\d+\s*[장화부권]|제\d+[장화부권]|\d+\s*장\s*[\.·]?|프롤로그|에필로그|서문|Chapter\s*\d+)[^가-힣]{0,8})\s*(.*)$/i;
   const dialogueRegex=/^\s*["“”‘’\-—]|:\s*["“]/;
   const rawBlocks=raw.split(/\n\s*\n/).map(b=>b.trim()).filter(b=>b.length>0);
-  rawBlocks.forEach(b=>{const lines=b.split('\n').map(l=>l.trim()).filter(Boolean); lines.forEach(line=>{if(line.length<=70 && chapterRegex.test(line)){blocks.push({type:'chapter', text:line});} else if(dialogueRegex.test(line)){blocks.push({type:'dialogue', text:line});} else if(line.length<=50 && blocks.length<2){blocks.push({type:'title', text:line});} else {blocks.push({type:'para', text:line});}});});
-  if(blocks.length>0 && blocks[0].type==='para' && blocks[0].text.length<60) blocks[0].type='title'; return blocks;
+  rawBlocks.forEach(b=>{
+    const lines=b.split('\n').map(l=>l.trim()).filter(Boolean);
+    lines.forEach(line=>{
+      // 한 줄에 챕터 제목 + 본문이 붙어 있는 경우 분리 (예: "1 장 . 이방인의 발길이...")
+      const m=line.match(chapterSplitRegex);
+      if(m){
+        const chapPart=m[1].trim();
+        const rest=m[2].trim();
+        if(chapPart.length>0 && chapPart.length<=80){
+          blocks.push({type:'chapter', text:chapPart});
+          if(rest.length>=10){
+            // 남은 본문은 별도 문단으로
+            blocks.push({type:'para', text:rest});
+          }
+          return;
+        }
+      }
+      if(chapterRegex.test(line)){
+        // 긴 줄이어도 챕터로 시작하면 챕터로, 단 120자 이하면
+        if(line.length<=120){
+          blocks.push({type:'chapter', text:line});
+        } else {
+          // 너무 길면 앞부분만 챕터로, 나머지는 본문으로 분리
+          const short=line.slice(0,60).trim();
+          const remainder=line.slice(60).trim();
+          if(chapterRegex.test(short)){
+            blocks.push({type:'chapter', text:short});
+            if(remainder) blocks.push({type:'para', text:remainder});
+          } else {
+            blocks.push({type:'para', text:line});
+          }
+        }
+      } else if(dialogueRegex.test(line)){
+        blocks.push({type:'dialogue', text:line});
+      } else if(line.length<=50 && blocks.length<2){
+        blocks.push({type:'title', text:line});
+      } else {
+        blocks.push({type:'para', text:line});
+      }
+    });
+  });
+  if(blocks.length>0 && blocks[0].type==='para' && blocks[0].text.length<60) blocks[0].type='title';
+  return blocks;
 }
 function buildToc(blocks){const toc=[]; blocks.forEach((b,i)=>{if(b.type==='chapter'||b.type==='title') toc.push({title:b.text, index:i});}); if(toc.length===0){let c=0,p=1; blocks.forEach((b,i)=>{c+=b.text.length; if(c>3000){toc.push({title:p+'장', index:i}); p++; c=0;}});} return toc;}
 function renderReader(book){
@@ -137,7 +193,28 @@ function renderReader(book){
   requestAnimationFrame(()=>{setTimeout(()=>{const y=book.progress||0; if(y>20) window.scrollTo(0,y);},120);});
 }
 function openBook(id){const book=library.find(b=>b.id===id); if(!book) return; currentBook=book; renderReader(book); renderToc(); showView('#view-reader'); applySettings(); localStorage.setItem('yeoun-current', id);}
-function renderLibrary(){const tab=document.querySelector('.tab.active').dataset.tab; const list=document.getElementById('lib-list'); list.innerHTML=''; const filtered=library.filter(b=>tab==='reading'?b.status!=='finished':b.status==='finished'); if(filtered.length===0){list.innerHTML='<div style="text-align:center;padding:40px;color:var(--muted);font-size:13px">서재가 비어 있습니다.</div>'; return;} filtered.forEach(book=>{const div=document.createElement('div'); div.className='book-item'; const pct=Math.min(100, Math.round((book.progress/(Math.max(1,book.raw.length*0.45)))*100))||0; div.innerHTML='<div style="flex:1;min-width:0;cursor:pointer" data-id="'+book.id+'"><div class="book-title-list">'+book.title+'</div><div class="book-sub">'+new Date(book.lastRead).toLocaleDateString()+' · '+(book.status==='finished'?'다 읽음':pct+'%')+' </div><div class="progress"><i style="width:'+pct+'%"></i></div></div><button class="icon-btn del" data-id="'+book.id+'"><svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M10 11v6M14 11v6"/></svg></button>'; list.appendChild(div);}); list.querySelectorAll('[data-id]').forEach(el=>{if(el.classList.contains('del')) return; el.onclick=()=>openBook(el.dataset.id);}); list.querySelectorAll('.del').forEach(btn=>btn.onclick=()=>{if(confirm('삭제할까요?')){library=library.filter(b=>b.id!==btn.dataset.id); saveLib(); renderLibrary();}});}
+function renderLibrary(){
+  const tab=document.querySelector('.tab.active').dataset.tab;
+  const list=document.getElementById('lib-list'); list.innerHTML='';
+  const filtered=library.filter(b=>tab==='reading'?b.status!=='finished':b.status==='finished');
+  if(filtered.length===0){list.innerHTML='<div style="text-align:center;padding:40px;color:var(--muted);font-size:13px">서재가 비어 있습니다.</div>'; return;}
+  filtered.forEach(book=>{
+    const div=document.createElement('div'); div.className='book-item';
+    let pct=0;
+    if(typeof book.progressPct==='number') pct=Math.round(book.progressPct);
+    else {
+      const totalEst=Math.max(1, book.raw.length*0.6);
+      pct=Math.min(99, Math.round((book.progress/totalEst)*100));
+      if(book.status==='finished') pct=100;
+    }
+    // 0%인데 읽은 기록이 있으면 최소 1% 표시
+    if(book.progress>50 && pct===0) pct=1;
+    div.innerHTML='<div style="flex:1;min-width:0;cursor:pointer" data-id="'+book.id+'"><div class="book-title-list">'+book.title+'</div><div class="book-sub">'+new Date(book.lastRead).toLocaleDateString()+' · '+(book.status==='finished'?'다 읽음':pct+'%')+' </div><div class="progress"><i style="width:'+pct+'%"></i></div></div><button class="icon-btn del" data-id="'+book.id+'"><svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M10 11v6M14 11v6"/></svg></button>';
+    list.appendChild(div);
+  });
+  list.querySelectorAll('[data-id]').forEach(el=>{if(el.classList.contains('del')) return; el.onclick=()=>openBook(el.dataset.id);});
+  list.querySelectorAll('.del').forEach(btn=>btn.onclick=()=>{if(confirm('삭제할까요?')){library=library.filter(b=>b.id!==btn.dataset.id); saveLib(); renderLibrary();}});
+}
 document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active')); t.classList.add('active'); renderLibrary();});
 let lastY=0; window.addEventListener('scroll',()=>{const y=window.scrollY; const h=document.getElementById('reader-header'), f=document.getElementById('reader-footer'); if(h){if(y>lastY&&y>120){h.classList.add('hide'); f.classList.add('hide');} else {h.classList.remove('hide'); f.classList.remove('hide');}} lastY=y; const total=document.documentElement.scrollHeight-window.innerHeight; const prog=total>0?(y/total)*100:0; const bar=document.getElementById('reader-progress-bar'); if(bar) bar.style.width=prog+'%'; const pt=document.getElementById('progress-text'); if(pt) pt.textContent=Math.round(prog)+'%'; if(y>50) saveProgress();},{passive:true});
 window.addEventListener('beforeunload',()=>saveProgress(true)); document.addEventListener('visibilitychange',()=>{if(document.hidden) saveProgress(true);});
